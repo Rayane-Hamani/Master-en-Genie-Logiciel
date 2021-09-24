@@ -1,0 +1,83 @@
+---
+title: "Partie 1"
+output: html_notebook
+---
+
+We consider IRIS database; The objective (Task) is to recognize IRIS flower specimen, based on the bisual characteristics of the flower (length and width of Sepal and Petal), and to qualify the learning through the 5-Fold cross validation.
+
+```{r Import de la base de données Iris}
+data("iris")
+```
+
+Question 1 : Considering the 5-fold cross validation, what is the size of the test sample and the training sample ?
+
+```{r Taille des échantillons dentraînement et de test}
+# La taille de l'échantillon d'entraînement est de 4
+# La taille de l'échantillon de test est de 1
+```
+
+Question 2 : Install the `party` and `Metrics` packages. What are they ?
+
+```{r Import des librairies, message=FALSE}
+#install.packages("party")
+#install.packages("Metrics")
+
+library(party)
+library(Metrics)
+
+# La librairie `party` est utilisée pour le partitionnement récursif comme les arbres
+# La librairie `Metrics` est utilisée pour mesurer des régressions, des séries temporelles, etc... Très utilisée en Machine Learning
+```
+
+Question 3 : Realize the function `scoring` of parameter N. N corresponds to N-Fold. The function returns the decision trees and the quality of the decision trees and their average.
+
+```{r Fonction scoring}
+scoring <- function(n) {
+  # on prend une seed afin que nos résultats soient reproductibles.
+  set.seed(1234)
+  
+  # on instantie la probabilité de nos futurs échantillons d'entraînement et de test
+  train_prob <- (n - 1) / n
+  test_prob  <-      1  / n
+  
+  # on détermine ce que l'on veut prédire et en fonction de quelles données
+  myFormula <- Species ~ Sepal.Length + Sepal.Width + Petal.Length + Petal.Width
+  
+  # on définie le vecteur des qualités de nos connaissances
+  quality = c()
+  
+  for(i in 1:n) {
+    # on répartit nos données en un set d'entraînement et un set de test
+    ind <- sample(2, nrow(iris), replace=TRUE, prob=c(train_prob, test_prob))
+    train.data <- iris[ind==1,]
+    test.data  <- iris[ind==2,]
+    
+    # on entraîne un arbre de décision
+    # on vous a laissé les dernières valeurs de ctree_controls avec lesquelles on a joué ;)
+    iris_ctree <- ctree(formula=myFormula, data=train.data, controls=ctree_control(minsplit=50, minbucket=30, maxsurrogate=3, maxdepth=3))
+    
+    # on affiche l'arbre
+    plot(iris_ctree)
+    
+    # on prédit les données de test
+    pred <- predict(iris_ctree, newdata=test.data)
+    real <- test.data$Species
+    table(pred, real) # ne sera pas affiché mais a été utilisé
+    
+    # on save le mean absolute error entre les données réelles et les données prédites
+    quality <- c(quality, mae(as.numeric(real), as.numeric(pred)))
+  }
+  
+  return(mean(quality))
+}
+
+scoring(5)
+```
+
+Question 4 : What do you think about the quality of models ?
+
+```{r}
+# Plus la valeur de n est élevée, meilleure est la qualité du model
+# Cela vient du fait que l'échantillon d'entraînement devient plus volumineux et fait donc diminuer le nombre d'erreurs lors des prédictions
+# Les paramètres de controls de ctree jouent aussi un rôle. Lorsque l'arbre n'est pas restreint ou que ses restrictions sont plus larges qu'il ne lui en faut, alors la qualité du model n'est pas bridée
+```

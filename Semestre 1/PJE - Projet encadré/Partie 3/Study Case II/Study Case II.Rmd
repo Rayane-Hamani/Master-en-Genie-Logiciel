@@ -1,0 +1,442 @@
+---
+title: "Study Case II : Customer Response Prediction and Profit Optimization"
+output: html_notebook
+---
+
+---
+
+Avant d'attaquer le coeur du sujet, importons librairies et les paquets nécessaires que nous allons utiliser au cours de cette étude de cas.
+
+```{r Import des librairies, message=FALSE}
+library(party)
+library(Metrics)
+```
+
+## Data and Variables
+
+Commençons par importer le fichier d'apprentissage.
+
+```{r Import du fichier dentraînement, warning=FALSE}
+cup98lrn <- read.csv(file='cup98LRN.txt', header=TRUE, sep=',')
+
+cup98lrn_rows <- nrow(cup98lrn)
+```
+
+---
+
+## Data Exploration
+
+```{r Graphique du nombre de donateurs par âge}
+hist(cup98lrn$AGE, main='Nombre de donateurs par âge',
+     xlab='Âge', ylab='Fréquence', labels=TRUE)
+grid()
+```
+
+```{r Graphique du nombre denfants par foyer}
+hist(cup98lrn$NUMCHLD, right=FALSE, main='Nombre d\'enfants par foyer',
+     xlab='Nombre d\'enfants', ylab='Fréquence', labels=TRUE)
+grid()
+```
+
+```{r Graphique du nombre de donateurs par genre}
+plot(cup98lrn$GENDER, main='Nombre de donateurs par genre',
+     xlab='Genre', ylab='Fréquence')
+grid()
+```
+
+```{r Graphique du montant par âge}
+pos_cup98lrn <- cup98lrn[cup98lrn$TARGET_D>0,]
+
+boxplot(pos_cup98lrn$TARGET_D ~ cut(pos_cup98lrn$AGE, right=FALSE, breaks=seq(0,100,5)), main='Montant par âge',
+        xlab='Âge', ylab='Montant', ylim=c(0,100), las=3)
+```
+```{r Graphique de la probabilité des dons par montant}
+plot(density(pos_cup98lrn$TARGET_D[pos_cup98lrn$GENDER=='M']), main='Probabilité des dons par montant',
+     xlab='Montant', ylab='Probabilité', col='blue', xlim=c(0,100))
+
+lines(density(pos_cup98lrn$TARGET_D[pos_cup98lrn$GENDER=='F']), col='red')
+lines(density(pos_cup98lrn$TARGET_D[pos_cup98lrn$GENDER=='J']), col='green')
+```
+
+---
+
+## Training Decision Trees
+
+Prenons une seed, afin que nos résultats soient reproductibles.
+
+```{r Initialisation dune seed}
+set.seed(1234)
+```
+
+Sélectionnons maintenant les données avec lesquelles nous construirons nos arbres de décisions.
+
+```{r Sélection des variables de larbre dans cup98lrn}
+relevant_col_cup98lrn <- c('AGE', 'AVGGIFT', 'CARDGIFT', 'CARDPM12', 'CARDPROM', 'CLUSTER', 'CLUSTER2', 'DOMAIN', 'GENDER', 'GEOCODE2', 'HIT', 'HOMEOWNR', 'HPHONE_D', 'INCOME', 'LASTGIFT', 'MAXRAMNT', 'MDMAUD_A', 'MDMAUD_F', 'MDMAUD_R', 'MINRAMNT', 'NGIFTALL', 'NUMCHLD', 'NUMPRM12', 'PCOWNERS', 'PEPSTRFL', 'PETS', 'RAMNTALL', 'RECINHSE', 'RFA_2A', 'RFA_2F', 'STATE', 'TIMELAG')
+
+cup98lrn <- cup98lrn[c('TARGET_D', relevant_col_cup98lrn)]
+```
+
+Pour nous faciliter la vie plus tard, nous allons créer une fonction `new_tree` qui crée et entraîne un arbre en fonction de certains paramètres. La fonction sauvegardera aussi l'arbre et les cumuls des donations des runs avec leur moyenne. Elle renverra ce dernier sous forme de dataframe afin de pouvoir exploiter les données directement. Elle pourra également faire des affichages mais ceux-ci sont en commentaire si vous voulez les voir.
+
+```{r Fonction qui crée larbre, prédit les donations et renvoie le dataframe des sommes cumulatives}
+new_tree <- function(loops, rate, cup98_filtered, minsplit, minbucket, maxsurrogate, maxdepth) {
+        addup_donations_rows <- round(cup98lrn_rows*(1-rate))
+        addup_donations <- matrix(0, nrow=addup_donations_rows, ncol=loops)
+        
+        for(i in 1:loops) {
+                # on répartit nos données en un set d'entraînement et un set de test
+                ind <- sample(cup98lrn_rows, size=cup98lrn_rows-addup_donations_rows)
+                X_train = cup98_filtered[ ind,]
+                X_test  = cup98_filtered[-ind,]
+                
+                # on entraîne un arbre de décision et on le save dans le répertoire courant
+                new_ctree <- ctree(TARGET_D ~ ., X_train, controls=ctree_control(minsplit=minsplit, minbucket=minbucket, maxsurrogate=maxsurrogate, maxdepth=maxdepth))
+                save(new_ctree, file=paste('new_ctree -', minsplit, '-', minbucket, '-', maxsurrogate, '-', maxdepth, '- run', i, '.rdata'))
+                # plot(new_ctree)
+                
+                # on prédit les données de test
+                # on les trie par ordre décroissant pour plus de clarté
+                pred <- predict(new_ctree, newdata=X_test)
+                pred.index.decr <- sort(pred, decreasing=TRUE, method='quick', index.return=TRUE)$ix
+                # plot(pred)
+                
+                # on met à jour nos matrices de donations
+                addup_donations[, i] <- cumsum(X_test$TARGET_D[pred.index.decr])
+        }
+        
+        # on fusionne les cumuls des donations nos runs avec la moyenne de chaque don en un dataframe
+        results <- data.frame(cbind(addup_donations, rowMeans(addup_donations)))
+        names(results) <- c(paste('run', 1:loops), 'average')
+        
+        # on enregistre nos résultats dans un fichier csv
+        write.csv(results, paste('addup_donations -', minsplit, '-', minbucket, '-', maxsurrogate, '-', maxdepth, '.csv'))
+        
+        # on retourne les résultats afin de les rendre utilisable directement
+        return(results)
+}
+```
+
+Maintenant que la fonction est créée, on peut l'appeler et sauvegarder les résultats afin de les réutiliser directement. Appelons-la avec minsplit=1000, minbucket=400, maxsurrogate=4 et maxdepth=10. On fera 10 boucles et on prendra 30% des données pertinentes de cup98 comme ensemble de test.
+
+```{r}
+results <- new_tree(10, 0.7, cup98lrn, 1000, 400, 4, 10)
+```
+
+---
+
+## Model Evaluation
+
+Précédemment, nous n'avons pas tenu compte du coût de contacter chaque potentiel donateur. C'est ici que l'on va le prendre en compte, ce qui va certes réduire le profit mais également nous donner un résultat plus réaliste.
+
+```{r Prise en compte du coût dans les prédictions}
+cost <- 0.5
+loops <- 10
+results_rows <- nrow(results)
+
+tail(results) # avant de tenir compte du coût
+results[,1:(loops+1)] <- results[,1:(loops+1)] - cost * (1:results_rows)
+tail(results) # après de tenir compte du coût
+```
+
+Maintenant que nos résultats sont un peu plus réalistes, on peut afficher graphiquement l'allure de nos prédictions.
+
+```{r Graphique cumuls des donations}
+plot(results[, loops+1],
+     main='Cumuls des donations',
+     xlab='Nombre de mails', ylab='Montant des donations (en $)',
+     ylim=c(0, results[results_rows, loops+1]*1.2),
+     type='l', lty='solid', lwd=2, col=1)
+
+for(i in 1:loops) {
+        lines(results[,i],
+              type='l', lty='dotted', lwd=1, col=1+i)
+}
+
+legend('bottomright',
+       legend=c('Average', paste('Run', 1:loops)), lwd=c(2, rep(1, loops)),
+       lty=c('solid', rep('dotted', loops)), col=1:(loops+1),
+       cex=0.8)
+
+grid()
+```
+
+Et mettre le tout sous forme de pourcentage.
+
+```{r Graphique pourcentages des donations}
+percentage_results <- sapply(1:(loops+1), function(i) 100 * results[, i] / results[results_rows, i])
+index_percentage_results <- 100 * (1:results_rows) / results_rows
+
+plot(index_percentage_results, percentage_results[, loops+1],
+     main='Pourcentage des donations',
+     xlab='Pourcentage des contacts', ylab='Pourcentage des donations',
+     ylim=c(0, percentage_results[results_rows, loops+1]*1.2),
+     type='l', lty='solid', lwd=2, col=1)
+
+for(i in 1:loops) {
+        lines(index_percentage_results, percentage_results[, i],
+              type='l', lty='dotted', lwd=1, col=1+i)
+}
+
+legend('bottomright',
+       legend=c('Average', paste('Run', 1:loops)), lwd=c(2, rep(1, loops)),
+       lty=c('solid', rep('dotted', loops)), col=1:(loops+1),
+       cex=0.8)
+
+grid()
+```
+
+On peut voir sur les graphiques qu'il y a de grandes disparités entre les runs. Certains surperforment tandis que d'autres sousperforment. Ultimement, ils se stabilisent tous au même point au même moment. La courbe moyenne donne un aperçu de la performance de l'arbre. Dans la prochaine section, nous jouerons avec les paramètres de l'arbre afin de sélectionner le meilleur arbre, l'arbre ayant le rendement le plus haut.
+
+---
+
+## Selecting the Best Tree
+
+On définit l'arbre que l'on connait actuellement comme meilleur arbre et on initialise les meilleurs paramètres connus.
+
+```{r Arbre actuel et ses paramètres}
+best_tree <- results[,loops+1] + cost * (1:results_rows)
+
+best_minsplit <- 1000
+best_minbucket <- 400
+best_maxsurrogate <- 4
+best_maxdepth <- 10
+```
+
+On va par la suite jouer avec les paramètres en commençant ici par la profondeur.
+
+```{r Meilleur depth, eval=FALSE}
+depth_06_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 3, 06)[, loops+1]
+depth_08_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 3, 08)[, loops+1]
+depth_12_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 3, 12)[, loops+1]
+depth_14_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 3, 14)[, loops+1]
+
+plot(best_tree,
+     main='Cumuls des donations',
+     xlab='Nombre de mails', ylab='Montant des donations (en $)',
+     ylim=c(0, best_tree[results_rows]*1.2),
+     type='l', lty='solid', lwd=2, col=1)
+
+lines(depth_06_tree, type='l', lty='dotted', lwd=1, col=2)
+lines(depth_08_tree, type='l', lty='dotted', lwd=1, col=3)
+lines(depth_12_tree, type='l', lty='dotted', lwd=1, col=4)
+lines(depth_14_tree, type='l', lty='dotted', lwd=1, col=5)
+
+legend('bottomright',
+       legend=c(paste('Depth', c(10, 06, 08, 12, 14))), lwd=c(2, rep(1, 4)),
+       lty=c('solid', rep('dotted', 4)), col=1:4,
+       cex=0.8)
+
+grid()
+
+# On met à jour le meilleur arbre
+
+if(best_tree[results_rows] < depth_06_tree[results_rows]) {
+        best_tree <- depth_06_tree
+        best_maxdepth <- 06
+}
+if(best_tree[results_rows] < depth_08_tree[results_rows]) {
+        best_tree <- depth_08_tree
+        best_maxdepth <- 08
+}
+if(best_tree[results_rows] < depth_12_tree[results_rows]) {
+        best_tree <- depth_12_tree
+        best_maxdepth <- 12
+}
+if(best_tree[results_rows] < depth_14_tree[results_rows]) {
+        best_tree <- depth_14_tree
+        best_maxdepth <- 14
+}
+```
+
+On recommence avec maxsurrogate.
+
+```{r Meilleur maxsurrogate, eval=FALSE}
+surrogate_01_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 1, best_maxdepth)[, loops+1]
+surrogate_02_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 2, best_maxdepth)[, loops+1]
+surrogate_03_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 3, best_maxdepth)[, loops+1]
+surrogate_05_tree <- new_tree(10, 0.7, cup98lrn, 1000, 400, 5, best_maxdepth)[, loops+1]
+
+plot(best_tree,
+     main='Cumuls des donations',
+     xlab='Nombre de mails', ylab='Montant des donations (en $)',
+     ylim=c(0, best_tree[results_rows]*1.2),
+     type='l', lty='solid', lwd=2, col=1)
+
+lines(surrogate_01_tree, type='l', lty='dotted', lwd=1, col=2)
+lines(surrogate_02_tree, type='l', lty='dotted', lwd=1, col=3)
+lines(surrogate_03_tree, type='l', lty='dotted', lwd=1, col=4)
+lines(surrogate_05_tree, type='l', lty='dotted', lwd=1, col=5)
+
+legend('bottomright',
+       legend=c(paste('Surrogate', c(04, 01, 02, 03, 05))), lwd=c(2, rep(1, 4)),
+       lty=c('solid', rep('dotted', 4)), col=1:4,
+       cex=0.8)
+
+grid()
+
+# On met à jour le meilleur arbre
+
+if(best_tree[results_rows] < surrogate_01_tree[results_rows]) {
+        best_tree <- surrogate_01_tree
+        best_maxsurrogate <- 01
+}
+if(best_tree[results_rows] < surrogate_02_tree[results_rows]) {
+        best_tree <- surrogate_02_tree
+        best_maxsurrogate <- 02
+}
+if(best_tree[results_rows] < surrogate_03_tree[results_rows]) {
+        best_tree <- surrogate_03_tree
+        best_maxsurrogate <- 03
+}
+if(best_tree[results_rows] < surrogate_05_tree[results_rows]) {
+        best_tree <- surrogate_05_tree
+        best_maxsurrogate <- 05
+}
+```
+
+On recommence avec minbucket.
+
+```{r Meilleur minbucket, eval=FALSE}
+minbucket_200_tree <- new_tree(10, 0.7, cup98lrn, 1000, 200, best_maxsurrogate, best_maxdepth)[, loops+1]
+minbucket_300_tree <- new_tree(10, 0.7, cup98lrn, 1000, 300, best_maxsurrogate, best_maxdepth)[, loops+1]
+minbucket_500_tree <- new_tree(10, 0.7, cup98lrn, 1000, 500, best_maxsurrogate, best_maxdepth)[, loops+1]
+minbucket_600_tree <- new_tree(10, 0.7, cup98lrn, 1000, 600, best_maxsurrogate, best_maxdepth)[, loops+1]
+
+plot(best_tree,
+     main='Cumuls des donations',
+     xlab='Nombre de mails', ylab='Montant des donations (en $)',
+     ylim=c(0, best_tree[results_rows]*1.2),
+     type='l', lty='solid', lwd=2, col=1)
+
+lines(minbucket_200_tree, type='l', lty='dotted', lwd=1, col=2)
+lines(minbucket_300_tree, type='l', lty='dotted', lwd=1, col=3)
+lines(minbucket_500_tree, type='l', lty='dotted', lwd=1, col=4)
+lines(minbucket_600_tree, type='l', lty='dotted', lwd=1, col=5)
+
+legend('bottomright',
+       legend=c(paste('Minbucket', c(400, 200, 300, 500, 600))), lwd=c(2, rep(1, 4)),
+       lty=c('solid', rep('dotted', 4)), col=1:4,
+       cex=0.8)
+
+grid()
+
+# On met à jour le meilleur arbre
+
+if(best_tree[results_rows] < minbucket_200_tree[results_rows]) {
+        best_tree <- minbucket_200_tree
+        best_minbucket <- 200
+}
+if(best_tree[results_rows] < minbucket_300_tree[results_rows]) {
+        best_tree <- minbucket_300_tree
+        best_minbucket <- 300
+}
+if(best_tree[results_rows] < minbucket_500_tree[results_rows]) {
+        best_tree <- minbucket_500_tree
+        best_minbucket <- 500
+}
+if(best_tree[results_rows] < minbucket_600_tree[results_rows]) {
+        best_tree <- minbucket_600_tree
+        best_minbucket <- 600
+}
+```
+
+On recommence avec minsplit.
+
+```{r Meilleur minsplit, eval=FALSE}
+minsplit_0600_tree <- new_tree(10, 0.7, cup98lrn, 0600, best_minbucket, best_maxsurrogate, best_maxdepth)[, loops+1]
+minsplit_0800_tree <- new_tree(10, 0.7, cup98lrn, 0800, best_minbucket, best_maxsurrogate, best_maxdepth)[, loops+1]
+minsplit_1200_tree <- new_tree(10, 0.7, cup98lrn, 1200, best_minbucket, best_maxsurrogate, best_maxdepth)[, loops+1]
+minsplit_1400_tree <- new_tree(10, 0.7, cup98lrn, 1400, best_minbucket, best_maxsurrogate, best_maxdepth)[, loops+1]
+
+plot(best_tree,
+     main='Cumuls des donations',
+     xlab='Nombre de mails', ylab='Montant des donations (en $)',
+     ylim=c(0, best_tree[results_rows]*1.2),
+     type='l', lty='solid', lwd=2, col=1)
+
+lines(minsplit_0600_tree, type='l', lty='dotted', lwd=1, col=2)
+lines(minsplit_0800_tree, type='l', lty='dotted', lwd=1, col=3)
+lines(minsplit_1200_tree, type='l', lty='dotted', lwd=1, col=4)
+lines(minsplit_1400_tree, type='l', lty='dotted', lwd=1, col=5)
+
+legend('bottomright',
+       legend=c(paste('Minbucket', c(1000, 0600, 0800, 1200, 1400))), lwd=c(2, rep(1, 4)),
+       lty=c('solid', rep('dotted', 4)), col=1:4,
+       cex=0.8)
+
+grid()
+
+# On met à jour le meilleur arbre
+
+if(best_tree[results_rows] < minsplit_0600_tree[results_rows]) {
+        best_tree <- minsplit_0600_tree
+        best_minbucket <- 0600
+}
+if(best_tree[results_rows] < minsplit_0800_tree[results_rows]) {
+        best_tree <- minsplit_0800_tree
+        best_minbucket <- 0800
+}
+if(best_tree[results_rows] < minsplit_1200_tree[results_rows]) {
+        best_tree <- minsplit_1200_tree
+        best_minbucket <- 1200
+}
+if(best_tree[results_rows] < minsplit_1400_tree[results_rows]) {
+        best_tree <- minsplit_1400_tree
+        best_minbucket <- 1400
+}
+```
+
+Pour ne pas tuer votre machine, je n'ai pas lancé les 4 codes ci-dessus dans le notebook. Cependant, je les ai testé plusieurs fois sur ma machine et les meilleurs paramètres de controls se sont révélés être :
+
+best_minsplit <- 1000
+
+best_minbucket <- 400
+
+best_maxsurrogate <- 4
+
+best_maxdepth <- 8
+
+---
+
+## Scoring
+
+Maintenant que nous avons les meilleurs paramètres, on peut charger le meilleur arbre.
+
+```{r Import du meilleur arbre}
+load('new_ctree - 1000 - 400 - 4 - 8 - run 10.rdata')
+```
+
+On peut ensuite charger le fichier de test cup98val pour y appliquer notre arbre.
+
+```{r Import du fichier de test, warning=FALSE}
+cup98val <- read.csv(file='cup98VAL.txt', header=TRUE, sep=',')
+
+cup98val_rows <- nrow(cup98val)
+```
+
+Comme précédemment, on se limite aux colonnes intéressantes de cup98val cette fois.
+
+```{r Sélection des variables de larbre dans cup98val}
+cup98val <- cup98val[c(relevant_col_cup98lrn)] # TARGET_D ne fait pas partie de cup98val
+```
+
+
+```{r}
+vars <- intersect(names(cup98lrn), names(cup98val))
+
+for (i in 1:length(vars)) {
+        varname <- vars[i]
+        trainLevels <- levels(cup98lrn[, varname])
+        scoreLevels <- levels(cup98val[, varname])
+        if (is.factor(cup98lrn[, varname]) & setequal(trainLevels, scoreLevels)==F) {
+                cat("Warning:new values found in score data, and they will be changed to NA!\n")
+                cat(varname, "\n")
+                cup98val[, varname] <- factor(cup98val[, varname], levels=trainLevels)
+        }
+}
+```
+
+
+---
+
+## Discussions and Conclusions
